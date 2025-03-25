@@ -10,6 +10,7 @@ from collections import deque
 # ---- Serial Config ----
 PORT = 'COM3'
 BAUD = 115200
+MOVEMENT_RADIUS = 2.0  # only show mov events within 2 meters
 
 # ---- GUI App ----
 class RadarApp:
@@ -22,7 +23,7 @@ class RadarApp:
         self.dist_data = deque(maxlen=100)
         self.time_data = deque(maxlen=100)
         self.start_time = time.time()
-        self.status = tk.StringVar(value="No Data")
+        self.status = tk.StringVar(value="Waiting for movement...")
 
         # GUI Layout
         self.create_widgets()
@@ -41,7 +42,7 @@ class RadarApp:
         ttk.Label(frame_top, text="Status:").grid(row=0, column=0)
         ttk.Label(frame_top, textvariable=self.status, foreground="blue").grid(row=0, column=1)
 
-        self.rmax_var = tk.StringVar(value="6")
+        self.rmax_var = tk.StringVar(value="2")
         self.mth1_var = tk.StringVar(value="60")
         self.mth2_var = tk.StringVar(value="30")
         self.mth3_var = tk.StringVar(value="20")
@@ -86,17 +87,12 @@ class RadarApp:
                 current_time = time.time() - self.start_time
 
                 if line.startswith("mov"):
-                    self.status.set("MOVING")
                     dis = float(line.split("=")[-1])
-                    self.dist_data.append(dis)
-                    self.time_data.append(current_time)
-                elif line.startswith("occ"):
-                    self.status.set("PRESENT")
-                    dis = float(line.split("=")[-1])
-                    self.dist_data.append(dis)
-                    self.time_data.append(current_time)
-                elif line.startswith("str"):
-                    pass  # Optional: display signal strength
+                    if dis <= MOVEMENT_RADIUS:
+                        self.status.set(f"MOVING @ {dis:.2f}m")
+                        self.dist_data.append(dis)
+                        self.time_data.append(current_time)
+                # Ignore other cases (occ, etc.)
             except Exception as e:
                 print("Error:", e)
 

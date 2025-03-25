@@ -8,3 +8,6 @@ EY9 BUCK CONVERTER MODULE
 DY-HV8F MP3 Player
 ATTINY1626-XFR Microcontrollor
 0.1u Capacitor
+3.6V Lithium Battery
+
+
