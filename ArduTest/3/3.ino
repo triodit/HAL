@@ -1,45 +1,19 @@
 #include <Arduino.h>
 
-/*
-  DIP Switch Settings (ACTIVE LOW)
-
-  DIP1 (Pin 1) - Range Select LSB
-  DIP2 (Pin 2) - Range Select MSB
-    00 = 2 meters
-    01 = 3 meters
-    10 = 4 meters
-    11 = 5 meters
-
-  DIP3 (Pin 3) - Track Mode
-    ON (LOW)  = Random tracks (00001–00034)
-    OFF (HIGH)= Track 00050 only
-
-  DIP4 (Pin 4) - Mute
-    ON (LOW)  = Silent (LED/radar only)
-    OFF (HIGH)= Sound playback enabled
-*/
-
 // ----- Pin Definitions -----
 #define LED_PIN         0
-#define MP3_BUSY_PIN    5
+#define MP3_BUSY_PIN    12
 #define RADAR_BOOT_PIN  16
 #define radarSerial     Serial1
 #define mp3Serial       Serial0
 
-// DIP Switches (INPUT_PULLUP)
-#define DIP1 1
-#define DIP2 2
-#define DIP3 3
-#define DIP4 4
+// DIP Switches
+#define DIP1 1  // Range LSB
+#define DIP2 2  // Range MSB
+#define DIP3 3  // Mode: Random (ON) / Track 50 (OFF)
+#define DIP4 4  // Mute (ON disables audio)
 
-// ----- Timing Settings -----
-#define CALM_TIMEOUT_MS     30000UL
-#define CALM_LOCK_MS        30000UL
-#define DIP_UPDATE_MS       5000UL
-#define PRESENCE_TRIGGER_MS 15000UL
-#define COOLDOWN_MS         180000UL  // 3 minutes
-
-// ----- LED Breathing -----
+// LED Brightness & Breathing Timing
 const int MIN_BRIGHT = 13;
 const int MAX_BRIGHT = 255;
 const float BREATH_MIN_DIST = 1.0;
@@ -48,43 +22,54 @@ const float MIN_CYCLE_MS = 2000;
 const float MAX_CYCLE_MS = 6000;
 const float BREATH_SMOOTHING = 0.05;
 
-// ----- State -----
+// Timing & Triggering
+#define DETECTION_TIME_MS   2000
+#define COOLDOWN_MS         300000UL
+#define CALM_TIMEOUT_MS     30000UL
+#define CALM_LOCK_MS        30000UL
+#define DIP_UPDATE_MS       5000UL
+
+// State Tracking
 String radarBuffer = "";
 float lastDistance = BREATH_MAX_DIST;
+bool isMoving = false;
 bool triggered = false;
-bool inRange = false;
-unsigned long rangeStart = 0;
-unsigned long lastPlayEnd = 0;
+unsigned long movStart = 0;
+unsigned long lastMov = 0;
+unsigned long lastPlay = 0;
 
-bool inCalmState = false;  // Start in pulse mode
+// Calm State
+bool inCalmState = true;
 unsigned long lastSeenTime = 0;
 unsigned long enteredCalmTime = 0;
 
+// Breathing State
 float smoothedDistance = BREATH_MAX_DIST;
 float cycleMs = MAX_CYCLE_MS;
 float phase = 0.0;
 unsigned long lastMillis = 0;
 unsigned long lastDipUpdate = 0;
 
+// Active range (updated from DIP1/2)
 uint8_t detectionRangeMeters = 4;
 
-// ----- DIP Logic -----
+// ----- DIP Utilities -----
 uint8_t getRangeMetersFromDIP() {
   uint8_t val = 0;
-  if (digitalRead(DIP1) == LOW) val |= 0x01;
-  if (digitalRead(DIP2) == LOW) val |= 0x02;
-  return constrain(val + 2, 2, 5);  // DIP 00 = 2m, 01 = 3m, etc.
+  if (!digitalRead(DIP1)) val |= 0x01;
+  if (!digitalRead(DIP2)) val |= 0x02;
+  return constrain(val + 1, 1, 4);
 }
 
 bool isMuted() {
-  return digitalRead(DIP4) == LOW;
+  return !digitalRead(DIP4);  // Active LOW
 }
 
 bool useRandomTracks() {
-  return digitalRead(DIP3) == LOW;
+  return digitalRead(DIP3);   // HIGH = Random
 }
 
-// ----- Play Track (5-digit filenames like 00001.mp3) -----
+// ----- Track Playback -----
 void playTrack(uint16_t track) {
   if (isMuted()) return;
 
@@ -102,23 +87,16 @@ void playTrack(uint16_t track) {
   }
 }
 
-// ----- Radar Parser -----
+// ----- Radar Parsing -----
 void processLine(String line) {
   line.trim();
   int idx = line.indexOf("dis=");
   if (idx != -1) {
     lastDistance = line.substring(idx + 4).toFloat();
-    bool nowInRange = (lastDistance <= detectionRangeMeters);
-
-    if (nowInRange && !inRange) {
-      inRange = true;
-      rangeStart = millis();
-    } else if (!nowInRange && inRange) {
-      inRange = false;
-      rangeStart = 0;
-    }
-
-    if (nowInRange) {
+    if (lastDistance <= detectionRangeMeters) {
+      if (!isMoving) movStart = millis();
+      isMoving = true;
+      lastMov = millis();
       lastSeenTime = millis();
       if (inCalmState && millis() - enteredCalmTime >= CALM_LOCK_MS) {
         inCalmState = false;
@@ -127,7 +105,7 @@ void processLine(String line) {
   }
 }
 
-// ----- LED Behavior -----
+// ----- LED Breathing -----
 void updateEyeLED() {
   if (!inCalmState && millis() - lastSeenTime > CALM_TIMEOUT_MS) {
     inCalmState = true;
@@ -171,6 +149,7 @@ void setup() {
   mp3Serial.begin(9600);
   delay(500);
 
+  // Set radar to normal mode and max range once
   radarSerial.println("test_mode=0");
   delay(50);
   radarSerial.println("rmax=4");
@@ -180,13 +159,14 @@ void setup() {
   detectionRangeMeters = getRangeMetersFromDIP();
   lastSeenTime = millis();
   enteredCalmTime = millis();
-  lastPlayEnd = millis() - COOLDOWN_MS;  // Skip initial wait
+  inCalmState = true;
   lastMillis = millis();
   lastDipUpdate = millis();
 }
 
 // ----- Main Loop -----
 void loop() {
+  // Radar input
   while (radarSerial.available()) {
     char c = radarSerial.read();
     if (c == '\n' || c == '\r') {
@@ -199,21 +179,25 @@ void loop() {
     }
   }
 
-  bool busy = (digitalRead(MP3_BUSY_PIN) == LOW);
-
-  if (!busy && !triggered && millis() - lastPlayEnd > COOLDOWN_MS) {
-    if (inRange && millis() - rangeStart >= PRESENCE_TRIGGER_MS) {
-      uint16_t track = useRandomTracks() ? random(1, 35) : 50;
-      playTrack(track);
+  // Trigger playback
+  if (isMoving && millis() - movStart >= DETECTION_TIME_MS) {
+    if (!triggered && millis() - lastPlay >= COOLDOWN_MS) {
       triggered = true;
+      lastPlay = millis();
+      if (useRandomTracks()) {
+        playTrack(random(1, 35));
+      } else {
+        playTrack(50);
+      }
     }
   }
 
-  if (triggered && !busy) {
-    lastPlayEnd = millis();
+  if (millis() - lastMov > 250) {
+    isMoving = false;
     triggered = false;
   }
 
+  // DIP switch update (range only)
   if (millis() - lastDipUpdate > DIP_UPDATE_MS) {
     detectionRangeMeters = getRangeMetersFromDIP();
     lastDipUpdate = millis();
